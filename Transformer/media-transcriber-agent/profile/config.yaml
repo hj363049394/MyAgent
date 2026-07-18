@@ -1,0 +1,175 @@
+# Hermes Profile 配置 — media-transcriber
+#
+# 本文件配置 media-transcriber Agent 的模型、辅助模型、平台和 Skills。
+# 配置要点参考知识库：
+#   - 01-hermes-agent/03-hermes-agent-installation.md（智谱 GLM 配置 + 踩坑）
+#   - 02-platform-integrations/01-feishu-bot.md（飞书 WebSocket 配置 + 踩坑）
+#
+# 关键坑（必须遵守）：
+#   1. provider 不能用 "custom"（custom 会强制 no-key，导致 401）
+#      - 方式 A：provider: "zai"（智谱原生，读 GLM_API_KEY）
+#      - 方式 B：provider: "auto"（通用 OpenAI 兼容，读 OPENAI_API_KEY + base_url）
+#   2. 智谱模型名无 -Flash 后缀（端点上不存在）
+#   3. 飞书事件订阅必须开 im.message.receive_v1
+#   4. FEISHU_ALLOW_ALL_USERS=true + *_POLICY=open（否则拒收消息）
+
+# ============================================================
+# 模型配置（方式 B：通用 OpenAI 兼容接入）
+# ============================================================
+model:
+  # 主模型：用于文本提纯（核心 LLM 任务）
+  # glm-4.7 中文语义理解强，提纯质量高，国内直连免费档可用
+  # 方式 B：provider: auto + base_url 指向智谱 OpenAI 兼容端点
+  default: "glm-4.7"
+  provider: "auto"                   # 通用 OpenAI 兼容方式（读取 OPENAI_API_KEY）
+  base_url: "https://open.bigmodel.cn/api/paas/v4"
+
+# 辅助模型配置
+auxiliary:
+  # 视觉模型：处理含图网页、视频封面识别
+  vision:
+    provider: "zai"
+    model: "glm-4.6v"                # 不要用 -flash 后缀（会触发 1305 限流）
+  # 网页提取：用于网页正文抽取的预处理
+  web_extract:
+    provider: "zai"
+    model: "glm-4.7"
+  # 语音标签：留空走主模型
+  tts_audio_tags:
+    provider: "zai"
+    model: ""
+  # 会话搜索：留空走主模型
+  session_search:
+    provider: "zai"
+    model: ""
+
+# ============================================================
+# ASR 配置（faster-whisper）
+# ============================================================
+asr:
+  # Phase 1（本地无 GPU）：medium + int8 量化
+  #   - 中文准确率"良好"，CPU 50分钟/小时音频
+  #   - 量化后内存占用 ~1GB
+  # Phase 2（服务器+GPU）：升级 large-v3
+  model: "medium"                    # tiny/base/small/medium/large-v3
+  device: "cpu"                      # cpu / cuda
+  compute_type: "int8"               # int8（CPU推荐）/ float16（GPU推荐）
+  language: "zh"                     # 强制中文，避免误判
+  beam_size: 5                       # 束搜索宽度，越大越准但越慢
+
+# ============================================================
+# 下载配置（yt-dlp）
+# ============================================================
+download:
+  # 音频格式优先级（yt-dlp 会按顺序尝试）
+  audio_format: "m4a/bestaudio"
+  # 下载目录（临时文件，处理完可清理）
+  temp_dir: "./tmp/downloads"
+  # 是否优先下载字幕
+  prefer_subtitle: true
+  # 字幕语言优先级
+  subtitle_lang: "zh,en"
+  # 代理设置（如需访问 YouTube）
+  # proxy: "http://127.0.0.1:7890"
+  # B 站反爬 cookies 配置（412 错误必需）
+  # 推荐：用 COOKIES_FILE 环境变量指定 Netscape 格式 cookies 文件路径
+  # 备选：用 COOKIES_FROM_BROWSER 环境变量指定浏览器（chrome/edge/firefox）
+  # 教程见 docs/troubleshooting.md 坑 31
+  cookies_file: "${COOKIES_FILE}"
+  cookies_from_browser: "${COOKIES_FROM_BROWSER}"
+
+# ============================================================
+# 转码配置（ffmpeg）
+# ============================================================
+transcode:
+  # ASR 标准输入格式：16kHz 单声道 wav
+  sample_rate: 16000
+  channels: 1
+  codec: "pcm_s16le"
+  output_dir: "./tmp/wav"
+  # 如果系统没装 ffmpeg，用 imageio-ffmpeg 提供的本地版本
+  # ffmpeg_path: ""  # 留空则用 PATH 中的 ffmpeg
+
+# ============================================================
+# 提纯配置（LLM）
+# ============================================================
+refine:
+  # 分段处理：每段最大字符数（避免 token 超限）
+  max_chunk_size: 5000
+  # 输出目录（MVP 阶段保存 Markdown）
+  output_dir: "./output"
+  # 输出格式
+  format: "markdown"
+
+# ============================================================
+# 飞书配置（Phase 2：文档交付；Phase 3：Bot 触发）
+# ============================================================
+# 配置参考：02-platform-integrations/01-feishu-bot.md
+platforms:
+  feishu:
+    enabled: true                    # Phase 2/3 启用
+    # Phase 2：文档交付（deliver_feishu.py）
+    #   - 读 .env 中 FEISHU_APP_ID / FEISHU_APP_SECRET 获取 token
+    #   - 读 .env 中 FEISHU_USER_ID 授权协作者
+    #   - CLI 触发：python scripts/pipeline.py --input <url> --deliver-to-feishu
+    #
+    # Phase 3：Bot 触发（独立轻量 Bot，lark-oapi WebSocket 长连接）
+    #   - 启动：python scripts/bot.py
+    #   - 无需公网 IP，WebSocket 出站连接到飞书服务器
+    #   - 飞书开放平台需开启机器人能力 + 订阅 im.message.receive_v1 事件
+    extra:
+      app_id: "${FEISHU_APP_ID}"
+      app_secret: "${FEISHU_APP_SECRET}"
+      domain: "feishu"               # feishu（国内）/ lark（国际）
+      # WebSocket 模式（Phase 3 启用）
+      websocket_mode: true           # Phase 3 Bot 用 lark-oapi 长连接
+      # 权限策略（关键：不开会被拒收消息）
+      allow_all_users: true
+      dm_policy: "open"              # 私聊策略：open（所有人可用）
+      group_policy: "open"           # 群聊策略
+      # 协作者授权（文档创建后自动授权本人）
+      auto_permission: true
+      default_owner: "${FEISHU_USER_ID}"  # 你的飞书用户 ID
+      # 管理员白名单（可选，逗号分隔的 open_id；ALLOW_ALL_USERS=false 时生效）
+      admin_ids: "${FEISHU_ADMIN_IDS}"
+
+# ============================================================
+# 文档交付配置（Phase 2）
+# ============================================================
+deliver:
+  # 是否在 pipeline 结束后自动交付到飞书
+  #   true：pipeline.py 运行时自动交付（需配凭据）
+  #   false：需手动加 --deliver-to-feishu 参数
+  auto: false
+  # 文档创建位置（可选，留空则创建在根目录）
+  folder_token: "${FEISHU_FOLDER_TOKEN}"
+  # 授权失败时是否降级为公开访问
+  fallback_public: true
+
+# ============================================================
+# Hermes Skills 配置
+# ============================================================
+skills:
+  # 启用的官方 Skills
+  enabled:
+    - media-transcription-pipeline   # 核心：下载+转录流水线
+    # Phase 2+ 启用飞书相关 Skills
+    # - lark-doc                      # 飞书文档创建
+    # - lark-drive                    # 飞书云空间权限
+  # 禁用的 Skills（本场景不需要）
+  disabled:
+    - lark-meeting-transcript-distillation  # 不需要飞书妙记
+    - lark-minutes                          # 不需要飞书会议
+    - lark-vc                               # 不需要飞书视频会议
+  # 自定义 Skills 路径
+  custom_skills_dir: "../skills"
+
+# ============================================================
+# 网关配置（Phase 3+ 启用）
+# ============================================================
+gateway:
+  enabled: false                     # Phase 1 设 false，Phase 3 改 true
+  # 后台运行方式
+  daemon: true
+  # 日志路径
+  log_file: "./logs/gateway.log"

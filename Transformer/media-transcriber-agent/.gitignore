@@ -1,0 +1,40 @@
+# 环境变量与凭据（绝不提交）
+.env
+*.secret
+credentials.json
+# 浏览器 cookies（B 站反爬用，含登录凭据）
+cookies.txt
+config/cookies.txt
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+venv/
+env/
+ENV/
+.venv/
+*.egg-info/
+
+# 临时文件与输出
+tmp/
+output/
+logs/
+.cache/
+
+# ASR 模型缓存
+*.bin
+*.pt
+*.gguf
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
