@@ -186,13 +186,17 @@ class MediaTranscriberPipeline:
             logger.info(f"已在飞书文档开头插入原文来源引用: {source_url}")
 
         # 生成 AI 总结（基于原始提纯正文，避免 source_url 干扰 LLM）
+        # 总结任务对推理深度要求低于提纯，使用 air 模型提速（30-60s vs 2-4min）
+        summary_model = self.llm_fallback  # glm-4.5-air
+        summary_fallback = "glm-4.5-flash"  # 再降级到 flash
+        logger.info(f"AI 总结使用快速模型: {summary_model} (fallback: {summary_fallback})")
         summary_block = ""
         summary_result = generate_ai_summary(
             refined_text=original_body,
             title=title,
             api_key=self.glm_api_key,
-            model=self.llm_model,
-            fallback_model=self.llm_fallback,
+            model=summary_model,
+            fallback_model=summary_fallback,
         )
         if summary_result["success"]:
             # 用 HTML 注释标记包裹，deliver_feishu._markdown_to_blocks 识别后转为 callout block

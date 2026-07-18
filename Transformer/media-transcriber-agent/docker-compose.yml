@@ -1,0 +1,79 @@
+# 媒体转录 Agent Docker Compose 配置
+# 与寺庙应用独立部署，使用独立的 network 和 volume
+#
+# 启动：docker compose up -d
+# 停止：docker compose down
+# 日志：docker compose logs -f bot
+# 重建：docker compose up -d --build
+#
+# 资源限制说明（4C8G 服务器，与寺庙应用共存）：
+# - CPU 配额 2.5 核（给寺庙应用留 1.5 核）
+# - 内存上限 4G（给寺庙应用留 4G）
+# - ASR 推理峰值短时打满 2 核，但不影响寺庙应用（Docker 调度）
+
+services:
+  bot:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: transcriber-bot:latest
+    container_name: transcriber-bot
+    restart: always  # 容器异常自动重启
+
+    # 资源限制（避免与寺庙应用抢占资源）
+    deploy:
+      resources:
+        limits:
+          cpus: '2.5'
+          memory: 4G
+        reservations:
+          memory: 2G
+
+    # 环境变量从 .env 加载（敏感信息不入代码）
+    env_file:
+      - .env
+
+    # 额外环境变量
+    environment:
+      - TZ=Asia/Shanghai
+      - PYTHONUNBUFFERED=1
+
+    # 挂载卷（持久化数据 + 模型缓存）
+    volumes:
+      # 配置文件（cookies 等）- 只读挂载
+      - ./config:/app/config:ro
+      # 输出目录（提纯稿）
+      - ./output:/app/output
+      # 临时目录（下载缓存、日志）
+      - ./tmp:/app/tmp
+      # ASR 模型缓存（避免容器重建时重下模型）
+      - modelscope_cache:/root/.cache/modelscope
+
+    # 网络模式：默认 bridge，仅出站访问
+    networks:
+      - transcriber-net
+
+    # 日志限制（避免日志撑满磁盘）
+    logging:
+      driver: json-file
+      options:
+        max-size: "50m"
+        max-file: "5"
+
+    # 健康检查（Dockerfile 内已定义，这里可覆盖）
+    healthcheck:
+      test: ["CMD", "pgrep", "-f", "python.*bot.py"]
+      interval: 60s
+      timeout: 10s
+      start_period: 60s
+      retries: 3
+
+# 命名卷（模型缓存持久化）
+volumes:
+  modelscope_cache:
+    driver: local
+
+# 独立网络（与寺庙应用隔离）
+networks:
+  transcriber-net:
+    driver: bridge
