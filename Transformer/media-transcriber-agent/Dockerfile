@@ -16,6 +16,12 @@ ENV TZ=Asia/Shanghai \
     PIP_NO_CACHE_DIR=1 \
     PIP_DISABLE_PIP_VERSION_CHECK=1
 
+# 切换 Debian apt 源到阿里云镜像（国内服务器加速）
+# python:3.11-slim 基于 Debian Trixie，默认源 deb.debian.org 国内访问慢
+RUN sed -i 's|deb.debian.org|mirrors.aliyun.com|g' /etc/apt/sources.list.d/debian.sources 2>/dev/null \
+    || sed -i 's|deb.debian.org|mirrors.aliyun.com|g' /etc/apt/sources.list 2>/dev/null \
+    || true
+
 # 安装系统依赖：
 # - ffmpeg: ASR 转码必需
 # - curl: 健康检查
@@ -31,12 +37,24 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 WORKDIR /app
 
+# 配置 pip 国内镜像源（清华 TUNA），加速 Python 依赖安装
+RUN mkdir -p /etc/pip \
+    && cat > /etc/pip/pip.conf <<'EOF'
+[global]
+index-url = https://pypi.tuna.tsinghua.edu.cn/simple
+trusted-host = pypi.tuna.tsinghua.edu.cn
+timeout = 120
+retries = 5
+EOF
+
 # 先复制 requirements.txt，利用 Docker 层缓存
 COPY requirements.txt .
 
 # 安装 Python 依赖
-# torch 用 CPU 版本（服务器无 GPU）
-RUN pip install --index-url https://download.pytorch.org/whl/cpu torch torchaudio \
+# torch 单独从清华 PyTorch 镜像安装 CPU 版本（服务器无 GPU）
+# 其他依赖从清华 PyPI 镜像安装
+RUN pip install --index-url https://mirrors.tuna.tsinghua.edu.cn/anaconda/cloud/pytorch/whl/cpu torch torchaudio \
+    || pip install --index-url https://download.pytorch.org/whl/cpu torch torchaudio \
     && pip install -r requirements.txt
 
 # 复制项目代码
