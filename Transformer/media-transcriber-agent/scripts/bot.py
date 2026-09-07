@@ -23,6 +23,7 @@
     - 链接：https://mp.weixin.qq.com/s/xxxxx
     - 视频链接：https://www.bilibili.com/video/BVxxxxx
     - 本地文件路径：D:\\meetings\\weekly.mp4
+    - 录音文件：直接发送 mp3/wav/m4a 等文件给 Bot，自动转录
     - 命令 /help 查看帮助
     - 命令 /status 查看处理队列状态
 """
@@ -48,6 +49,7 @@ from lark_oapi.api.im.v1 import (
     CreateMessageRequestBody,
     PatchMessageRequest,
     PatchMessageRequestBody,
+    GetMessageResourceRequest,
 )
 
 # 加载 .env
@@ -243,6 +245,63 @@ class FeishuClient:
         except Exception as e:
             logger.error(f"更新消息异常: {e}")
             return False
+
+    def download_file(
+        self, file_key: str, message_id: str, file_name: str = ""
+    ) -> Optional[str]:
+        """
+        下载文件消息中的文件资源到本地临时目录
+
+        Args:
+            file_key: 文件消息中的 file_key
+            message_id: 消息 ID（下载消息内文件资源必需）
+            file_name: 原始文件名（用于保留扩展名）
+
+        Returns:
+            本地临时文件路径，失败返回 None
+        """
+        try:
+            request = (
+                GetMessageResourceRequest.builder()
+                .message_id(message_id)
+                .file_key(file_key)
+                .type("file")
+                .build()
+            )
+            resp = self.client.im.v1.message_resource.get(request)
+            if not resp.success():
+                logger.error(
+                    f"下载文件失败: code={resp.code}, msg={resp.msg}, log_id={resp.get_log_id()}"
+                )
+                return None
+
+            data = resp.file
+            if data is None:
+                logger.error("下载文件失败: 响应中无文件内容")
+                return None
+
+            file_content = data.getvalue()
+            if not file_content:
+                logger.error("下载文件失败: 文件内容为空")
+                return None
+
+            # 确定文件名：优先用消息中的 file_name，其次响应头，最后时间戳
+            final_name = file_name or resp.file_name or f"recording_{int(time.time())}"
+            safe_name = re.sub(r'[\\/:*?"<>|\s]', "_", final_name)
+            # 无扩展名时补充默认扩展名（飞书语音资源常见为 m4a）
+            if not os.path.splitext(safe_name)[1]:
+                safe_name += ".m4a"
+            save_dir = os.path.join(SCRIPT_DIR, "..", "tmp", "uploads")
+            os.makedirs(save_dir, exist_ok=True)
+            save_path = os.path.join(save_dir, f"{int(time.time())}_{safe_name}")
+
+            with open(save_path, "wb") as f:
+                f.write(file_content)
+            logger.info(f"文件已下载: {save_path} ({len(file_content)} bytes)")
+            return save_path
+        except Exception as e:
+            logger.error(f"下载文件异常: {e}", exc_info=True)
+            return None
 
 
 # ============================================================
@@ -446,6 +505,13 @@ def handle_message(data: lark.im.v1.P2ImMessageReceiveV1, processor: TaskProcess
         sender_user_id = sender_id_obj.user_id
         sender_union_id = sender_id_obj.union_id
 
+        # 处理文件消息（录音/视频等）和语音消息
+        if msg_type in ("file", "audio"):
+            _handle_file_message(
+                msg, message_id, chat_id, chat_type, sender_open_id, processor
+            )
+            return
+
         # 只处理文本消息
         if msg_type != "text":
             logger.info(f"跳过非文本消息: type={msg_type}")
@@ -516,6 +582,64 @@ def handle_message(data: lark.im.v1.P2ImMessageReceiveV1, processor: TaskProcess
         logger.error(f"处理消息异常: {e}", exc_info=True)
 
 
+def _handle_file_message(
+    msg: Any,
+    message_id: str,
+    chat_id: str,
+    chat_type: str,
+    sender_open_id: str,
+    processor: TaskProcessor,
+):
+    """处理文件消息（下载文件并提交转录任务）"""
+    try:
+        content = json.loads(msg.content)
+    except Exception:
+        logger.warning(f"文件消息内容解析失败: {msg.content}")
+        return
+
+    file_key = content.get("file_key", "")
+    file_name = content.get("file_name", "")
+    logger.info(
+        f"收到文件消息: chat_id={chat_id}, type={chat_type}, "
+        f"sender={sender_open_id}, file_name={file_name}, file_key={file_key}"
+    )
+
+    # 权限校验
+    if not _check_permission(chat_type, sender_open_id):
+        logger.warning(f"权限不足，拒绝消息: sender={sender_open_id}")
+        return
+
+    if not file_key:
+        logger.warning("文件消息缺少 file_key，无法下载")
+        return
+
+    receive_id = chat_id
+    receive_id_type = "chat_id"
+    client = processor.feishu_client
+
+    # 下载文件到本地
+    local_path = client.download_file(file_key, message_id, file_name)
+    if not local_path:
+        client.send_message(
+            receive_id,
+            receive_id_type,
+            "❌ 文件下载失败，请重试或确认文件有效",
+        )
+        return
+
+    # 提交转录任务
+    task_id = f"task_{int(time.time())}_{sender_open_id[-6:]}"
+    processor.submit(
+        task_id=task_id,
+        input_source=local_path,
+        receive_id=receive_id,
+        receive_id_type=receive_id_type,
+        reply_message_id=message_id,
+        title=os.path.splitext(os.path.basename(local_path))[0],
+        sender_open_id=sender_open_id,
+    )
+
+
 def _check_permission(chat_type: str, sender_open_id: str) -> bool:
     """权限校验"""
     # 群聊策略
@@ -551,6 +675,7 @@ def _handle_command(
         help_text = (
             "📖 使用说明\n\n"
             "直接发送以下内容即可触发转录：\n"
+            "• 录音文件：直接发送 mp3/wav/m4a 等文件给 Bot\n"
             "• 网页链接：https://mp.weixin.qq.com/s/xxx\n"
             "• 视频链接：https://www.bilibili.com/video/BVxxx\n"
             "• YouTube：https://youtube.com/watch?v=xxx\n"
@@ -628,7 +753,8 @@ def _send_help(receive_id: str, receive_id_type: str, client: FeishuClient):
         receive_id,
         receive_id_type,
         "🤖 我是音视频转录整理 Bot\n\n"
-        "直接发送链接或文件路径即可触发转录：\n"
+        "直接发送链接、文件路径或录音文件即可触发转录：\n"
+        "• 录音文件：直接发送 mp3/wav/m4a 等文件\n"
         "• 网页：https://mp.weixin.qq.com/s/xxx\n"
         "• 视频：https://www.bilibili.com/video/BVxxx\n"
         "• 本地文件：D:\\\\path\\\\to\\\\file.mp4\n\n"
